@@ -1,27 +1,25 @@
 [theme]
-base = "light"
-primaryColor = "#1B4332"
-backgroundColor = "#E8F6EF"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#1A2E28"
-linkColor = "#2D6A4F"
-borderColor = "#B7DCC8"
+base = "dark"
+primaryColor = "#7C3AED"
+backgroundColor = "#0B0F1A"
+secondaryBackgroundColor = "#141A2A"
+textColor = "#E8ECF5"
+linkColor = "#93C5FD"
+borderColor = "#2A3350"
 font = "sans-serif"
 headingFont = "sans-serif"
-baseRadius = "1.5rem"
+baseRadius = "1.1rem"
 buttonRadius = "999rem"
 baseFontSize = 16
-widgetBorderColor = "#A8D5BA"
+widgetBorderColor = "#3B4668"
 showWidgetBorder = true
 showSidebarBorder = false
 
-greenColor = "#2D6A4F"
-greenBackgroundColor = "#D8F3DC"
-greenTextColor = "#1B4332"
-blueColor = "#5B7C99"
-blueBackgroundColor = "#D6E4F0"
-yellowColor = "#C9A227"
-yellowBackgroundColor = "#FBF0C9"
+blueColor = "#2563EB"
+blueBackgroundColor = "#1E293B"
+violetColor = "#7C3AED"
+violetBackgroundColor = "#1E1B4B"
+grayColor = "#94A3B8"
 
 [client]
 toolbarMode = "minimal"

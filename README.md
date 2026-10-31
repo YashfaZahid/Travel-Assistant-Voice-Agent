@@ -1,14 +1,13 @@
 # Travel Assistant Voice Agent
 
-A cute, animated Streamlit voice companion built on the OpenAI Agents SDK realtime API. Paste your API key, tap **Get started**, and talk.
+ChatGPT-style live voice travel companion on Streamlit. Paste your API key, allow the mic, and talk — replies stream in real time over WebRTC (not recorded clips).
 
 ## Features
 
 - API key gate (session-only — never written to disk)
-- Soft Recenter-inspired UI with an animated companion blob
-- **Browser microphone** via `st.audio_input` (works on Streamlit Cloud — no PortAudio)
-- Spoken replies played back in the browser
-- Live conversation transcripts
+- OpenAI Realtime **WebRTC** conversation (interruptible, low-latency)
+- Minimal purple / blue / charcoal UI — gradient orb + chat
+- Works on Streamlit Cloud (browser mic, no PortAudio)
 
 ## Setup
 
