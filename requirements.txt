@@ -1,5 +1,6 @@
 openai-agents
 python-dotenv
 numpy
-sounddevice
 streamlit>=1.57
+# Optional local continuous mic (not needed on Streamlit Cloud):
+# sounddevice

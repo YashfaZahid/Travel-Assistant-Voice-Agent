@@ -6,7 +6,8 @@ A cute, animated Streamlit voice companion built on the OpenAI Agents SDK realti
 
 - API key gate (session-only — never written to disk)
 - Soft Recenter-inspired UI with an animated companion blob
-- Noise-hardened listening (far-field noise reduction + server VAD + mic RMS gate)
+- **Browser microphone** via `st.audio_input` (works on Streamlit Cloud — no PortAudio)
+- Spoken replies played back in the browser
 - Live conversation transcripts
 
 ## Setup

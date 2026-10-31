@@ -1,4 +1,8 @@
-"""Shared realtime voice session helpers with noise-hardened VAD settings."""
+"""Shared realtime voice session helpers with noise-hardened VAD settings.
+
+Local-only continuous mic/speaker path. Streamlit Cloud uses `voice_browser.py`
+instead (browser mic via st.audio_input — no PortAudio required).
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(), override=True)
@@ -27,6 +30,14 @@ from agents.realtime import (
 )
 from agents.realtime.items import AssistantMessageItem, UserMessageItem
 
+try:
+    import sounddevice as sd
+
+    HAS_SOUNDDEVICE = True
+except Exception:  # noqa: BLE001 — PortAudio missing on Streamlit Cloud
+    sd = None  # type: ignore[assignment]
+    HAS_SOUNDDEVICE = False
+
 
 def _extract_message_text(item: Any) -> tuple[str | None, str]:
     """Return (role, text) from a history message item, if any."""
@@ -40,14 +51,9 @@ def _extract_message_text(item: Any) -> tuple[str | None, str]:
             parts.append(str(text))
     return role, "".join(parts).strip()
 
+
 SAMPLE_RATE = 24_000
-
-# Client-side gate: ambient laptop/room noise stays well below this;
-# normal speech is usually several thousand RMS on int16 PCM.
 MIC_RMS_THRESHOLD = 450
-
-# Server VAD: higher threshold = less likely to treat noise as speech.
-# Longer silence = fewer cut-offs / false end-of-turn on brief quiet spots.
 VAD_THRESHOLD = 0.72
 VAD_SILENCE_MS = 850
 VAD_PREFIX_PADDING_MS = 300
@@ -81,8 +87,6 @@ def build_model_config(
             input_audio_transcription=RealtimeInputAudioTranscriptionConfig(
                 model="gpt-4o-mini-transcribe"
             ),
-            # near_field = headset/close mic; far_field = laptop/built-in mic.
-            # far_field is safer for typical laptop demos.
             input_audio_noise_reduction=RealtimeInputAudioNoiseReductionConfig(
                 type="far_field"
             ),
@@ -121,6 +125,12 @@ async def run_realtime_session(
     callbacks: SessionCallbacks | None = None,
 ) -> None:
     """Open mic + speaker streams and run until stop or fatal error."""
+    if not HAS_SOUNDDEVICE or sd is None:
+        raise RuntimeError(
+            "PortAudio / sounddevice is not available. "
+            "Use the Streamlit browser-mic UI (streamlit_app.py) instead."
+        )
+
     cb = callbacks or SessionCallbacks()
     loop = asyncio.get_running_loop()
     playback_tracker = RealtimePlaybackTracker()
@@ -170,13 +180,9 @@ async def run_realtime_session(
 
     async with await RealtimeRunner(agent).run(model_config=model_config) as session:
         cb.on_status("listening")
-        # Track last emitted text per item so streaming assistant updates
-        # refresh without duplicating finished user turns.
         emitted: dict[str, str] = {}
 
         def mic_callback(indata, frames, time, status):  # noqa: ARG001
-            # Replace quiet ambient frames with silence so server VAD
-            # does not wake on fan / keyboard / room noise.
             if _rms_int16(indata) < MIC_RMS_THRESHOLD:
                 payload = np.zeros_like(indata).tobytes()
             else:
@@ -252,7 +258,7 @@ def start_session_thread(
     def _target() -> None:
         try:
             asyncio.run(run_realtime_session(agent, callbacks))
-        except Exception as exc:  # noqa: BLE001 — surface to UI callback
+        except Exception as exc:  # noqa: BLE001
             callbacks.on_error(exc)
             callbacks.on_status("error")
 
