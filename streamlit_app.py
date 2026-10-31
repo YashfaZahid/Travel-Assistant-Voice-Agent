@@ -7,6 +7,7 @@ import os
 import time
 from collections import deque
 
+import numpy as np
 import streamlit as st
 
 st.set_page_config(
@@ -367,9 +368,13 @@ export default function (component) {
   const statusEl = parentElement.querySelector('#mic-status');
   const active = !!(data && data.active);
   const paused = !!(data && data.paused);
-  const speechThreshold = (data && data.speechThreshold) || 0.02;
-  const silenceMs = (data && data.silenceMs) || 850;
-  const minSpeechMs = (data && data.minSpeechMs) || 450;
+  // Higher threshold = less ambient-noise "hearing"; hysteresis helps commit turns.
+  const speechOn = (data && data.speechThreshold) || 0.045;
+  const speechOff = (data && data.speechOffThreshold) || 0.018;
+  const silenceMs = (data && data.silenceMs) || 700;
+  const minSpeechMs = (data && data.minSpeechMs) || 500;
+  const maxUtteranceMs = (data && data.maxUtteranceMs) || 7000;
+  const warmupFrames = (data && data.warmupFrames) || 3;
 
   if (!parentElement.__mic) {
     parentElement.__mic = {
@@ -470,8 +475,29 @@ export default function (component) {
       mic.buffers = [];
       mic.speaking = false;
       mic.emitting = false;
+      mic.loudFrames = 0;
       setStateValue('listening', true);
-      setStatus('Listening — speak naturally');
+      setStatus('Listening — speak clearly');
+
+      function commitUtterance(reason) {
+        const spokeLongEnough = (Date.now() - mic.speechStartedAt) >= minSpeechMs;
+        const chunks = mic.buffers.slice();
+        mic.buffers = [];
+        mic.speaking = false;
+        mic.silenceStartedAt = 0;
+        mic.loudFrames = 0;
+        if (!spokeLongEnough || chunks.length === 0) {
+          setStatus('Listening — speak clearly');
+          setStateValue('phase', 'listen');
+          return;
+        }
+        mic.emitting = true;
+        setStatus(reason === 'max' ? 'Got a long take — thinking…' : 'Got it — thinking…');
+        setStateValue('phase', 'processing');
+        const b64 = encodeWav(chunks, ctx.sampleRate || 24000);
+        setTriggerValue('utterance', b64);
+        setTimeout(() => { mic.emitting = false; }, 400);
+      }
 
       processor.onaudioprocess = (event) => {
         if (!mic.active || mic.paused || mic.emitting) return;
@@ -481,41 +507,39 @@ export default function (component) {
         const rms = Math.sqrt(sum / input.length);
         const now = Date.now();
 
-        if (rms >= speechThreshold) {
-          if (!mic.speaking) {
-            mic.speaking = true;
-            mic.speechStartedAt = now;
-            mic.buffers = [];
-            setStatus('Hearing you…');
-            setStateValue('phase', 'speech');
+        // Need a few loud frames in a row before we treat it as real speech.
+        if (!mic.speaking) {
+          if (rms >= speechOn) {
+            mic.loudFrames = (mic.loudFrames || 0) + 1;
+            if (mic.loudFrames >= warmupFrames) {
+              mic.speaking = true;
+              mic.speechStartedAt = now;
+              mic.buffers = [new Float32Array(input)];
+              mic.silenceStartedAt = 0;
+              setStatus('Hearing you…');
+              setStateValue('phase', 'speech');
+            }
+          } else {
+            mic.loudFrames = 0;
           }
-          mic.silenceStartedAt = 0;
-          mic.buffers.push(new Float32Array(input));
           return;
         }
 
-        if (mic.speaking) {
-          mic.buffers.push(new Float32Array(input));
-          if (!mic.silenceStartedAt) mic.silenceStartedAt = now;
-          if (now - mic.silenceStartedAt >= silenceMs) {
-            const spokeLongEnough = (now - mic.speechStartedAt) >= minSpeechMs;
-            const chunks = mic.buffers.slice();
-            mic.buffers = [];
-            mic.speaking = false;
-            mic.silenceStartedAt = 0;
-            if (!spokeLongEnough || chunks.length === 0) {
-              setStatus('Listening — speak naturally');
-              setStateValue('phase', 'listen');
-              return;
-            }
-            mic.emitting = true;
-            setStatus('Got it — thinking…');
-            setStateValue('phase', 'processing');
-            const b64 = encodeWav(chunks, ctx.sampleRate || 24000);
-            setTriggerValue('utterance', b64);
-            // Keep paused until Python clears busy; allow next turn after.
-            setTimeout(() => { mic.emitting = false; }, 300);
-          }
+        // Already in a speech turn.
+        mic.buffers.push(new Float32Array(input));
+        if (now - mic.speechStartedAt >= maxUtteranceMs) {
+          commitUtterance('max');
+          return;
+        }
+
+        if (rms >= speechOff) {
+          mic.silenceStartedAt = 0;
+          return;
+        }
+
+        if (!mic.silenceStartedAt) mic.silenceStartedAt = now;
+        if (now - mic.silenceStartedAt >= silenceMs) {
+          commitUtterance('silence');
         }
       };
 
@@ -536,7 +560,7 @@ export default function (component) {
   if (!active && mic.started) stopMic();
   if (active && mic.started && paused) setStatus('Paused while assistant speaks');
   if (active && mic.started && !paused && !mic.speaking && !mic.emitting) {
-    setStatus('Listening — speak naturally');
+    setStatus('Listening — speak clearly');
   }
 }
 """,
@@ -552,9 +576,13 @@ def mount_continuous_mic(*, active: bool, paused: bool):
         data={
             "active": active,
             "paused": paused,
-            "speechThreshold": 0.02,
-            "silenceMs": 850,
-            "minSpeechMs": 450,
+            # Less noise-sensitive; needs real speech energy to start a turn.
+            "speechThreshold": 0.048,
+            "speechOffThreshold": 0.02,
+            "silenceMs": 700,
+            "minSpeechMs": 500,
+            "maxUtteranceMs": 7000,
+            "warmupFrames": 3,
             "sampleRate": SAMPLE_RATE,
         },
         default={"listening": False, "phase": "idle"},
@@ -588,6 +616,12 @@ def _on_utterance() -> None:
             st.session_state.chat_lines.append(
                 ("assistant", "I barely caught that — try speaking a little longer.")
             )
+            st.session_state.agent_status = "listening"
+            return
+
+        # Drop near-silent clips that slipped past the browser gate.
+        rms = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2))) if pcm.size else 0.0
+        if rms < 350:
             st.session_state.agent_status = "listening"
             return
 
