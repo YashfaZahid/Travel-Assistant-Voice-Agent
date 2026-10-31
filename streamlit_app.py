@@ -340,14 +340,14 @@ export default function (component) {
     const type = msg.type || '';
 
     if (type === 'input_audio_buffer.speech_started') {
-      v.targetEnergy = 0.55;
+      v.targetEnergy = 0.28;
       setStatus('Listening…');
       v.userBuf = '';
     } else if (type === 'input_audio_buffer.speech_stopped') {
-      v.targetEnergy = 0.25;
+      v.targetEnergy = 0.18;
       setStatus('Thinking…');
     } else if (type === 'response.output_audio.delta' || type === 'response.audio.delta') {
-      v.targetEnergy = 0.85;
+      v.targetEnergy = 0.32;
       setStatus('Speaking…');
     } else if (
       type === 'conversation.item.input_audio_transcription.completed' ||
@@ -367,7 +367,7 @@ export default function (component) {
     ) {
       v.assistantBuf = (v.assistantBuf || '') + (msg.delta || '');
       pushLine('assistant', v.assistantBuf);
-      v.targetEnergy = 0.8;
+      v.targetEnergy = 0.3;
       setStatus('Speaking…');
     } else if (
       type === 'response.output_audio_transcript.done' ||
@@ -376,13 +376,13 @@ export default function (component) {
     ) {
       if (msg.transcript) pushLine('assistant', msg.transcript);
       v.assistantBuf = '';
-      v.targetEnergy = 0.2;
+      v.targetEnergy = 0.14;
       setStatus(v.connected ? 'Listening…' : '');
     } else if (type === 'error') {
       const err = (msg.error && (msg.error.message || msg.error)) || 'Connection error';
       setStatus(String(err));
       setStateValue('error', String(err));
-      v.targetEnergy = 0.12;
+      v.targetEnergy = 0.1;
     }
   }
 
@@ -524,9 +524,9 @@ function initParticles(v, canvas) {
     const phi = Math.acos(2 * vang - 1);
     pts.push({
       theta, phi,
-      r: 0.78 + Math.random() * 0.18,
+      r: 0.82 + Math.random() * 0.12,
       phase: Math.random() * Math.PI * 2,
-      speed: 0.4 + Math.random() * 0.9,
+      speed: 0.08 + Math.random() * 0.12,
       size: 0.7 + Math.random() * 1.5,
     });
   }
@@ -554,7 +554,7 @@ function loop(v, canvas) {
   const draw = (now) => {
     v.raf = requestAnimationFrame(draw);
     v.anim = now * 0.001;
-    v.energy += (v.targetEnergy - v.energy) * 0.08;
+    v.energy += (v.targetEnergy - v.energy) * 0.04;
 
     const w = canvas.width;
     const h = canvas.height;
@@ -565,8 +565,8 @@ function loop(v, canvas) {
 
     // soft glow behind sphere
     const glow = ctx.createRadialGradient(cx, cy, scale * 0.2, cx, cy, scale * 1.35);
-    glow.addColorStop(0, 'rgba(124,58,237,' + (0.18 + v.energy * 0.2) + ')');
-    glow.addColorStop(0.55, 'rgba(37,99,235,0.08)');
+    glow.addColorStop(0, 'rgba(124,58,237,' + (0.14 + v.energy * 0.08) + ')');
+    glow.addColorStop(0.55, 'rgba(37,99,235,0.06)');
     glow.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = glow;
     ctx.beginPath();
@@ -577,29 +577,28 @@ function loop(v, canvas) {
     const t = v.anim;
     const e = v.energy;
 
-    // draw back-to-front roughly via y sort every frame is expensive; skip sort, use alpha by depth
+    // Stable sphere: tiny surface shimmer + very slow spin
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       const wave =
-        Math.sin(p.theta * 3 + t * p.speed) * 0.06 +
-        Math.sin(p.phi * 4 - t * 1.3 + p.phase) * 0.05 +
-        Math.sin((p.theta + p.phi) * 2 + t * (1.2 + e)) * (0.04 + e * 0.08);
+        Math.sin(p.theta * 2 + t * p.speed + p.phase) * 0.012 +
+        Math.sin(p.phi * 3 - t * 0.25 + p.phase) * 0.01 +
+        Math.sin((p.theta + p.phi) + t * 0.2) * (0.006 + e * 0.012);
       const radius = p.r + wave;
       const x3 = radius * Math.sin(p.phi) * Math.cos(p.theta);
       const y3 = radius * Math.cos(p.phi);
       const z3 = radius * Math.sin(p.phi) * Math.sin(p.theta);
 
-      // light rotate
-      const rot = t * 0.25;
+      const rot = t * 0.04;
       const xr = x3 * Math.cos(rot) - z3 * Math.sin(rot);
       const zr = x3 * Math.sin(rot) + z3 * Math.cos(rot);
 
       const depth = (zr + 1.2) / 2.2;
       const px = cx + xr * scale;
       const py = cy + y3 * scale;
-      const elev = Math.max(0, wave * 4);
-      const alpha = 0.25 + depth * 0.7;
-      const size = p.size * dpr * (0.7 + depth * 0.9) * (1 + e * 0.35);
+      const elev = Math.max(0, wave * 8);
+      const alpha = 0.28 + depth * 0.65;
+      const size = p.size * dpr * (0.75 + depth * 0.85) * (1 + e * 0.12);
 
       ctx.beginPath();
       ctx.fillStyle = colorFor(y3, elev) + alpha + ')';
