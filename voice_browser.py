@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import wave
 from typing import Any
@@ -24,6 +25,12 @@ INSTRUCTIONS = (
     "Give short, enthusiastic destination tips and gentle conversation. "
     "Keep spoken answers to 1-3 sentences."
 )
+
+
+def b64_wav_to_pcm16(b64_payload: str, *, target_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode a base64 WAV string (from the continuous-mic component) to PCM16."""
+    raw = b64_payload.split(",", 1)[-1] if "," in b64_payload else b64_payload
+    return wav_file_to_pcm16(base64.b64decode(raw), target_rate=target_rate)
 
 
 def wav_file_to_pcm16(file_obj: Any, *, target_rate: int = SAMPLE_RATE) -> np.ndarray:

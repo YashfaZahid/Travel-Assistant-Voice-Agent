@@ -1,9 +1,10 @@
-"""Cute animated Streamlit travel voice agent — browser mic (Cloud-safe)."""
+"""Cute animated Streamlit travel voice agent — continuous browser mic."""
 
 from __future__ import annotations
 
 import html
 import os
+import time
 from collections import deque
 
 import streamlit as st
@@ -163,10 +164,14 @@ if "openai_api_key" not in st.session_state:
 
 os.environ["OPENAI_API_KEY"] = st.session_state["openai_api_key"]
 
-from voice_browser import SAMPLE_RATE, run_voice_turn, wav_file_to_pcm16  # noqa: E402
+from voice_browser import (  # noqa: E402
+    SAMPLE_RATE,
+    b64_wav_to_pcm16,
+    run_voice_turn,
+)
 
 # ---------------------------------------------------------------------------
-# Animated companion (Custom Components v2)
+# Animated companion
 # ---------------------------------------------------------------------------
 _COMPANION = st.components.v2.component(
     name="recenter_companion",
@@ -221,10 +226,7 @@ _COMPANION = st.components.v2.component(
     """,
     css="""
     @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800&family=Caveat:wght@600&display=swap');
-    :host, .stage {
-      font-family: 'Nunito', system-ui, sans-serif;
-      color: #1A2E28; width: 100%; display: block;
-    }
+    :host, .stage { font-family: 'Nunito', system-ui, sans-serif; color: #1A2E28; width: 100%; display: block; }
     .stage { position: relative; padding: 0.25rem 0 0.5rem; }
     .status-pill {
       display: inline-flex; align-items: center; gap: 0.45rem;
@@ -233,10 +235,7 @@ _COMPANION = st.components.v2.component(
       padding: 0.35rem 0.75rem; font-size: 0.82rem; font-weight: 700;
       box-shadow: 0 6px 18px rgba(27,67,50,0.08); margin-bottom: 0.75rem;
     }
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%; background: #95A5A0;
-      box-shadow: 0 0 0 0 rgba(45,106,79,0.4);
-    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #95A5A0; }
     .stage[data-state="listening"] .dot,
     .stage[data-state="speaking"] .dot,
     .stage[data-state="connecting"] .dot {
@@ -310,11 +309,9 @@ _COMPANION = st.components.v2.component(
     @keyframes pulse-dot {
       0% { box-shadow: 0 0 0 0 rgba(45,106,79,0.45); }
       70% { box-shadow: 0 0 0 8px rgba(45,106,79,0); }
-      100% { box-shadow: 0 0 0 0 rgba(45,106,79,0); }
     }
     @media (max-width: 520px) {
       .chip { display: none; }
-      .note { font-size: 1.05rem; }
       .card { min-height: 280px; }
     }
     """,
@@ -328,7 +325,7 @@ export default function (component) {
   const labels = {
     idle: 'Ready when you are',
     connecting: 'Thinking…',
-    listening: 'Active now — tap the mic',
+    listening: 'Active now',
     speaking: 'Talking…',
     stopped: 'Paused',
     error: 'Something went wrong',
@@ -345,12 +342,281 @@ def companion(state: str = "idle", *, key: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Session chat state
+# Continuous browser mic — auto-sends when you stop speaking
 # ---------------------------------------------------------------------------
+_MIC = st.components.v2.component(
+    name="continuous_browser_mic",
+    html="""
+    <div class="mic-wrap" id="mic-wrap">
+      <div class="mic-status" id="mic-status">Mic idle</div>
+    </div>
+    """,
+    css="""
+    .mic-wrap { min-height: 0.5rem; }
+    .mic-status {
+      font-family: Nunito, system-ui, sans-serif;
+      font-size: 0.85rem;
+      color: #5B746A;
+      text-align: center;
+      padding: 0.25rem 0 0.5rem;
+    }
+    """,
+    js="""
+export default function (component) {
+  const { data, parentElement, setTriggerValue, setStateValue } = component;
+  const statusEl = parentElement.querySelector('#mic-status');
+  const active = !!(data && data.active);
+  const paused = !!(data && data.paused);
+  const speechThreshold = (data && data.speechThreshold) || 0.02;
+  const silenceMs = (data && data.silenceMs) || 850;
+  const minSpeechMs = (data && data.minSpeechMs) || 450;
+
+  if (!parentElement.__mic) {
+    parentElement.__mic = {
+      started: false,
+      stream: null,
+      ctx: null,
+      processor: null,
+      source: null,
+      buffers: [],
+      speaking: false,
+      speechStartedAt: 0,
+      silenceStartedAt: 0,
+      emitting: false,
+    };
+  }
+  const mic = parentElement.__mic;
+  mic.active = active;
+  mic.paused = paused;
+
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text;
+  }
+
+  function floatTo16BitPCM(float32Array) {
+    const out = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+
+  function encodeWav(floatChunks, sampleRate) {
+    let length = 0;
+    for (const c of floatChunks) length += c.length;
+    const pcm = new Int16Array(length);
+    let offset = 0;
+    for (const c of floatChunks) {
+      pcm.set(floatTo16BitPCM(c), offset);
+      offset += c.length;
+    }
+    const buffer = new ArrayBuffer(44 + pcm.length * 2);
+    const view = new DataView(buffer);
+    const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, pcm.length * 2, true);
+    let idx = 44;
+    for (let i = 0; i < pcm.length; i++, idx += 2) view.setInt16(idx, pcm[i], true);
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  function stopMic() {
+    try { mic.processor && mic.processor.disconnect(); } catch (e) {}
+    try { mic.source && mic.source.disconnect(); } catch (e) {}
+    try { mic.ctx && mic.ctx.close(); } catch (e) {}
+    if (mic.stream) mic.stream.getTracks().forEach((t) => t.stop());
+    mic.started = false;
+    mic.stream = null;
+    mic.ctx = null;
+    mic.processor = null;
+    mic.source = null;
+    mic.buffers = [];
+    mic.speaking = false;
+    setStatus('Mic idle');
+    setStateValue('listening', false);
+  }
+
+  async function startMic() {
+    if (mic.started) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+        video: false,
+      });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      if (ctx.state === 'suspended') await ctx.resume();
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      mic.stream = stream;
+      mic.ctx = ctx;
+      mic.source = source;
+      mic.processor = processor;
+      mic.started = true;
+      mic.buffers = [];
+      mic.speaking = false;
+      mic.emitting = false;
+      setStateValue('listening', true);
+      setStatus('Listening — speak naturally');
+
+      processor.onaudioprocess = (event) => {
+        if (!mic.active || mic.paused || mic.emitting) return;
+        const input = event.inputBuffer.getChannelData(0);
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+        const rms = Math.sqrt(sum / input.length);
+        const now = Date.now();
+
+        if (rms >= speechThreshold) {
+          if (!mic.speaking) {
+            mic.speaking = true;
+            mic.speechStartedAt = now;
+            mic.buffers = [];
+            setStatus('Hearing you…');
+            setStateValue('phase', 'speech');
+          }
+          mic.silenceStartedAt = 0;
+          mic.buffers.push(new Float32Array(input));
+          return;
+        }
+
+        if (mic.speaking) {
+          mic.buffers.push(new Float32Array(input));
+          if (!mic.silenceStartedAt) mic.silenceStartedAt = now;
+          if (now - mic.silenceStartedAt >= silenceMs) {
+            const spokeLongEnough = (now - mic.speechStartedAt) >= minSpeechMs;
+            const chunks = mic.buffers.slice();
+            mic.buffers = [];
+            mic.speaking = false;
+            mic.silenceStartedAt = 0;
+            if (!spokeLongEnough || chunks.length === 0) {
+              setStatus('Listening — speak naturally');
+              setStateValue('phase', 'listen');
+              return;
+            }
+            mic.emitting = true;
+            setStatus('Got it — thinking…');
+            setStateValue('phase', 'processing');
+            const b64 = encodeWav(chunks, ctx.sampleRate || 24000);
+            setTriggerValue('utterance', b64);
+            // Keep paused until Python clears busy; allow next turn after.
+            setTimeout(() => { mic.emitting = false; }, 300);
+          }
+        }
+      };
+
+      // Keep the graph alive without playing the mic back into the speakers.
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      source.connect(processor);
+      processor.connect(mute);
+      mute.connect(ctx.destination);
+    } catch (err) {
+      setStatus('Mic permission denied');
+      setTriggerValue('error', String(err && err.message ? err.message : err));
+      stopMic();
+    }
+  }
+
+  if (active && !mic.started) startMic();
+  if (!active && mic.started) stopMic();
+  if (active && mic.started && paused) setStatus('Paused while assistant speaks');
+  if (active && mic.started && !paused && !mic.speaking && !mic.emitting) {
+    setStatus('Listening — speak naturally');
+  }
+}
+""",
+)
+
+
+MIC_KEY = "continuous_mic"
+
+
+def mount_continuous_mic(*, active: bool, paused: bool):
+    return _MIC(
+        key=MIC_KEY,
+        data={
+            "active": active,
+            "paused": paused,
+            "speechThreshold": 0.02,
+            "silenceMs": 850,
+            "minSpeechMs": 450,
+            "sampleRate": SAMPLE_RATE,
+        },
+        default={"listening": False, "phase": "idle"},
+        on_listening_change=lambda: None,
+        on_phase_change=lambda: None,
+        on_utterance_change=_on_utterance,
+        on_error_change=_on_mic_error,
+        height="auto",
+    )
+
+
+def _on_mic_error() -> None:
+    err = st.session_state.get(MIC_KEY, {}).get("error")
+    if err:
+        st.session_state.agent_status = "error"
+        st.session_state.last_error = str(err)
+
+
+def _on_utterance() -> None:
+    payload = st.session_state.get(MIC_KEY, {}).get("utterance")
+    if not payload or st.session_state.get("busy"):
+        return
+
+    st.session_state.busy = True
+    st.session_state.agent_status = "connecting"
+    st.session_state.chat_lines.append(("you", "🎤 Voice message"))
+
+    try:
+        pcm = b64_wav_to_pcm16(payload, target_rate=SAMPLE_RATE)
+        if pcm.size < SAMPLE_RATE // 5:
+            st.session_state.chat_lines.append(
+                ("assistant", "I barely caught that — try speaking a little longer.")
+            )
+            st.session_state.agent_status = "listening"
+            return
+
+        text, wav_bytes = run_voice_turn(pcm)
+        st.session_state.reply_wav = wav_bytes
+        # Keep mic paused while the reply plays (approx. from PCM size @ 24kHz).
+        approx_sec = max(1.5, (len(wav_bytes) - 44) / 2 / SAMPLE_RATE)
+        st.session_state.pause_until = time.time() + approx_sec + 0.5
+        st.session_state.chat_lines.append(("assistant", text or "(spoken reply)"))
+        st.session_state.agent_status = "speaking"
+    except Exception as exc:  # noqa: BLE001
+        st.session_state.agent_status = "error"
+        st.session_state.last_error = str(exc)
+        st.session_state.chat_lines.append(("assistant", f"Sorry — {exc}"))
+        st.session_state.pause_until = 0
+    finally:
+        st.session_state.busy = False
+
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+st.session_state.setdefault("session_active", False)
+st.session_state.setdefault("busy", False)
+st.session_state.setdefault("agent_status", "idle")
 st.session_state.setdefault("chat_lines", deque(maxlen=40))
-st.session_state.setdefault("agent_status", "listening")
 st.session_state.setdefault("reply_wav", None)
-st.session_state.setdefault("last_audio_id", None)
+st.session_state.setdefault("last_error", None)
+st.session_state.setdefault("pause_until", 0.0)
 
 top_l, top_r = st.columns([4, 1])
 with top_l:
@@ -361,10 +627,27 @@ with top_l:
     )
 with top_r:
     if st.button(":material/key: Key", help="Change API key", use_container_width=True):
+        st.session_state.session_active = False
         st.session_state.pop("openai_api_key", None)
         st.rerun()
 
-companion(st.session_state.agent_status, key="companion_blob")
+
+@st.fragment(run_every="1s")
+def companion_panel() -> None:
+    paused = (
+        st.session_state.busy
+        or time.time() < float(st.session_state.pause_until or 0)
+    )
+    status = st.session_state.agent_status
+    if st.session_state.session_active and not paused and status == "speaking":
+        status = "listening"
+        st.session_state.agent_status = "listening"
+    elif st.session_state.session_active and paused and status == "listening":
+        status = "speaking" if st.session_state.reply_wav else "connecting"
+    companion(status, key="companion_blob")
+
+
+companion_panel()
 
 col_a, col_b = st.columns(2)
 with col_a:
@@ -377,52 +660,66 @@ with col_b:
     st.html(
         '<div class="stack-card stack-blue">'
         '<div class="stack-label">Feel in control</div>'
-        "<div>Allow the mic, record a question, get a spoken reply.</div></div>"
+        "<div>Speak freely — it answers when you stop talking.</div></div>"
     )
 
-st.subheader("Talk to your companion")
-st.caption("Allow microphone access when the browser asks, then record and stop.")
+btn_l, btn_r = st.columns([1, 1])
+with btn_l:
+    start = st.button(
+        ":material/mic: Get started",
+        type="primary",
+        use_container_width=True,
+        disabled=st.session_state.session_active,
+        key="start_btn",
+    )
+with btn_r:
+    stop = st.button(
+        ":material/stop_circle: Pause",
+        use_container_width=True,
+        disabled=not st.session_state.session_active,
+        key="stop_btn",
+    )
 
-audio = st.audio_input(
-    "Record your question",
-    sample_rate=SAMPLE_RATE,
-    key="browser_mic",
-    help="Uses your browser microphone — works on Streamlit Cloud.",
+if start:
+    st.session_state.session_active = True
+    st.session_state.agent_status = "listening"
+    st.session_state.last_error = None
+    st.rerun()
+if stop:
+    st.session_state.session_active = False
+    st.session_state.agent_status = "stopped"
+    st.session_state.busy = False
+    st.rerun()
+
+mic_paused = (
+    st.session_state.busy
+    or time.time() < float(st.session_state.pause_until or 0)
 )
 
-if audio is not None:
-    audio_id = f"{getattr(audio, 'name', 'clip')}-{getattr(audio, 'size', 0)}"
-    if st.session_state.last_audio_id != audio_id:
-        st.session_state.last_audio_id = audio_id
-        st.session_state.agent_status = "connecting"
-        companion("connecting", key="companion_busy")
-        st.session_state.chat_lines.append(("you", "🎤 Voice message"))
+if (
+    st.session_state.session_active
+    and st.session_state.agent_status == "speaking"
+    and not mic_paused
+    and not st.session_state.busy
+):
+    st.session_state.agent_status = "listening"
 
-        try:
-            with st.spinner("Listening and thinking…"):
-                pcm = wav_file_to_pcm16(audio, target_rate=SAMPLE_RATE)
-                if pcm.size < SAMPLE_RATE // 5:
-                    raise ValueError("Recording too short — hold the mic a bit longer.")
-                text, wav_bytes = run_voice_turn(pcm)
+# Keep mic mounted outside fragments so the AudioContext stays alive.
+mount_continuous_mic(
+    active=st.session_state.session_active,
+    paused=mic_paused,
+)
 
-            st.session_state.reply_wav = wav_bytes
-            reply = text or "(spoken reply)"
-            st.session_state.chat_lines.append(("assistant", reply))
-            st.session_state.agent_status = "speaking"
-            st.rerun()
-        except Exception as exc:  # noqa: BLE001
-            st.session_state.agent_status = "error"
-            st.error(f"Voice turn failed: {exc}")
+if st.session_state.last_error:
+    st.error(st.session_state.last_error)
 
 if st.session_state.reply_wav:
     st.audio(st.session_state.reply_wav, format="audio/wav", autoplay=True)
-    if st.session_state.agent_status == "speaking":
-        st.session_state.agent_status = "listening"
 
 st.subheader("Conversation")
 lines = list(st.session_state.chat_lines)
 if not lines:
-    st.caption("Tap the microphone above, speak, then stop — your assistant replies out loud.")
+    st.caption("Press **Get started**, allow the mic, then just talk — it replies when you stop.")
 else:
     for role, text in lines[-12:]:
         css = "msg-you" if role == "you" else "msg-assistant"
