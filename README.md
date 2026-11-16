@@ -1,45 +1,45 @@
-# Travel Assistant Voice Agent
+# Travel Assistant
 
-ChatGPT-style live voice travel companion on Streamlit. Paste your API key, allow the mic, and talk — replies stream in real time over WebRTC (not recorded clips).
+A live voice travel agent. You talk, it talks back, and you can interrupt it. Audio goes over OpenAI Realtime with WebRTC in the browser, not through recorded clips uploaded after the fact.
 
-## Features
+The assistant is **Dola**: a travel companion that can plan, banter, and keep a short spoken reply instead of a wall of text.
 
-- API key gate (session-only — never written to disk)
-- OpenAI Realtime **WebRTC** conversation (interruptible, low-latency)
-- Minimal purple / blue / charcoal UI — gradient orb + chat
-- Works on Streamlit Cloud (browser mic, no PortAudio)
+## What it does
 
-## Setup
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Optional: copy `.env.example` to `.env` and set `OPENAI_API_KEY`. You can also enter the key in the app UI.
+- Session-only API key gate. The key is not written to disk by the Streamlit UI.
+- Interruptible realtime conversation with voice-activity detection tuned for noisy rooms
+- Browser microphone path that runs on Streamlit Community Cloud without PortAudio
+- Optional local continuous microphone through `sounddevice` when PortAudio is installed
+- A terminal agent (`16-realtime_agents.py`) that shares the same session core
 
 ## Run
 
+Python 3.10+ and an OpenAI key with Realtime access.
+
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # optional; you can also paste the key in the UI
 streamlit run streamlit_app.py
 ```
 
-CLI (no UI):
+Terminal only:
 
 ```bash
 python 16-realtime_agents.py
 ```
 
-## Requirements
+## Layout
 
-- Python 3.10+
-- Working microphone and speakers
-- OpenAI API key with Realtime / `gpt-realtime` access
-
-## Repo layout
-
-| File | Purpose |
-|------|---------|
-| `streamlit_app.py` | Main Streamlit UI + API key page |
-| `realtime_core.py` | Shared realtime session, audio I/O, VAD settings |
+| File | Role |
+| --- | --- |
+| `streamlit_app.py` | UI, key gate, browser session |
+| `voice_browser.py` | Browser microphone path |
+| `realtime_core.py` | Shared session, sample rate, VAD thresholds |
+| `ephemeral.py` | Short-lived realtime session helper |
 | `16-realtime_agents.py` | Terminal voice agent |
-| `.streamlit/config.toml` | Soft mint theme |
+
+## Limits
+
+You need a working microphone and a Realtime-capable key. The local mic path is optional and is not required on Streamlit Cloud.
